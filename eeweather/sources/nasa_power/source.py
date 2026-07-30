@@ -289,8 +289,14 @@ def cell_for(family, latitude, longitude):
     entirely client-side arithmetic; requests go to the centre so every
     point inside a cell produces one cache key and one identical series.
     A cell owns its low edge, and every boundary is an exact binary
-    fraction, so no tolerance is needed.
+    fraction, so no tolerance is needed. The antimeridian is one cell —
+    longitude 180 is the same meridian as -180, and a met centre that
+    lands on 180 is keyed as -180 — and the solar grid's top row is
+    capped at its 89.5 centre; the met grid has true pole rows.
     """
+    if longitude == 180.0:
+        longitude = -180.0
+
     if family == "met":
         latitude_steps = math.floor(
             (latitude + MET_LATITUDE_STEP / 2) / MET_LATITUDE_STEP
@@ -298,12 +304,16 @@ def cell_for(family, latitude, longitude):
         longitude_steps = math.floor(
             (longitude + MET_LONGITUDE_STEP / 2) / MET_LONGITUDE_STEP
         )
-        cell = Cell(
-            MET_LATITUDE_STEP * latitude_steps, MET_LONGITUDE_STEP * longitude_steps
-        )
+        longitude_centre = MET_LONGITUDE_STEP * longitude_steps
+        if longitude_centre == 180.0:
+            longitude_centre = -180.0
+        cell = Cell(MET_LATITUDE_STEP * latitude_steps, longitude_centre)
     elif family == "solar":
+        latitude_centre = math.floor(latitude / SOLAR_STEP) * SOLAR_STEP + SOLAR_STEP / 2
+        if latitude_centre > 89.5:
+            latitude_centre = 89.5
         cell = Cell(
-            math.floor(latitude / SOLAR_STEP) * SOLAR_STEP + SOLAR_STEP / 2,
+            latitude_centre,
             math.floor(longitude / SOLAR_STEP) * SOLAR_STEP + SOLAR_STEP / 2,
         )
     else:
@@ -369,19 +379,26 @@ def _published_through(df):
 
 
 def _latency_warning(family, published_through, requested_end):
+    if published_through is None:
+        extent = "any of the requested range"
+        published = None
+    else:
+        extent = "through the end of the requested range"
+        published = published_through.isoformat()
+
     warning = EEWeatherWarning(
         qualified_name="eeweather.source_latency",
         description=(
             "The {} {} grid publishes about {} days in arrears and has not"
-            " published through the end of the requested range.".format(
-                SOURCE_NAME, family, FAMILY_COVERAGE[family].latency_days
+            " published {}.".format(
+                SOURCE_NAME, family, FAMILY_COVERAGE[family].latency_days, extent
             )
         ),
         data={
             "source": SOURCE_NAME,
             "family": family,
             "requested_end": requested_end.isoformat(),
-            "published_through": published_through.isoformat(),
+            "published_through": published,
         },
     )
 
@@ -501,7 +518,7 @@ class NASAPowerSource(Source):
         coverage = FAMILY_COVERAGE[family]
         blocks = []
         sources = []
-        api_version = None
+        api_versions = []
         elevation = None
         for year in range(max(start.year, coverage.first_year), end.year + 1):
             block, metadata = self._load_year(
@@ -514,7 +531,8 @@ class NASAPowerSource(Source):
             for name in metadata["sources"]:
                 if name not in sources:
                     sources.append(name)
-            api_version = metadata["api_version"]
+            if metadata["api_version"] not in api_versions:
+                api_versions.append(metadata["api_version"])
             elevation = metadata["elevation"]
 
         if blocks:
@@ -530,7 +548,7 @@ class NASAPowerSource(Source):
             "cell_lat": cell.latitude,
             "cell_lon": cell.longitude,
             "sources": sources,
-            "api_version": api_version,
+            "api_versions": api_versions,
         }
         if family == "met":
             # the elevation the response geometry carries is the mean
@@ -540,8 +558,14 @@ class NASAPowerSource(Source):
 
         warnings = []
         requested_end = pd.Timestamp(end).floor("h")
-        published_through = _published_through(df[start:end])
-        if published_through is not None and published_through < requested_end:
+        # the edge is read from the whole fetched frame, not the
+        # requested slice: a range that sits entirely past the edge has
+        # an all-fill slice, which dates nothing but is exactly the case
+        # the warning exists for
+        published_through = _published_through(df)
+        dated_requested = any(name not in NIGHT_UNDEFINED for name in variables)
+        behind = published_through is None or published_through < requested_end
+        if blocks and dated_requested and behind:
             warnings.append(
                 _latency_warning(family, published_through, requested_end)
             )
@@ -565,13 +589,15 @@ class NASAPowerSource(Source):
         and fetching is disabled.
         """
         key = cache_key(family, cell, year)
-        cached, metadata = None, None
+        cached, metadata, fresh = None, None, False
         if self.cacheable:
-            cached, metadata = read_cached_year(
+            cached, metadata, fresh = read_cached_year(
                 key, year, FAMILY_COVERAGE[family].volatility
             )
 
-        covers_request = cached is not None and set(variables) <= set(cached.columns)
+        covers_request = (
+            fresh and cached is not None and set(variables) <= set(cached.columns)
+        )
         if read_from_cache and covers_request:
             requested = cached[list(variables)]
 

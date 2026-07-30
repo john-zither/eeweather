@@ -19,6 +19,7 @@ from eeweather.sources.pipeline import (
     load_year,
     read_cached_year,
     requested_variables,
+    resample_by_vocabulary,
     serialize_hourly_data,
 )
 
@@ -138,34 +139,38 @@ def test_deserialize_hourly_data_without_metadata_gives_none():
 
 
 def test_read_cached_year_empty(monkeypatch_key_value_store):
-    block, metadata = read_cached_year(CACHE_KEY, 2007)
+    block, metadata, fresh = read_cached_year(CACHE_KEY, 2007)
 
     assert block is None
     assert metadata is None
+    assert fresh is False
 
 
 def test_read_cached_year_fresh(mock_api_transport, monkeypatch_key_value_store):
     _load_2007(("temperature",))
 
-    block, _ = read_cached_year(CACHE_KEY, 2007)
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007)
 
     assert block is not None
+    assert fresh is True
 
 
-def test_read_cached_year_expired_entry_is_cleared(
+def test_read_cached_year_reports_a_stale_entry_and_keeps_it(
     mock_api_transport, monkeypatch_key_value_store
 ):
     _load_2007(("temperature",))
 
-    # a cache entry written during its own data year goes stale
+    # a cache entry written during its own data year goes stale, but its
+    # block is kept so a refresh can fetch the union of its columns
     _backdate_cache_key(
         monkeypatch_key_value_store, CACHE_KEY, pytz.UTC.localize(datetime(2007, 3, 3))
     )
 
-    block, _ = read_cached_year(CACHE_KEY, 2007)
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007)
 
-    assert block is None
-    assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is False
+    assert block is not None
+    assert fresh is False
+    assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is True
 
 
 def test_read_cached_year_returns_the_stored_response_metadata(
@@ -178,7 +183,7 @@ def test_read_cached_year_returns_the_stored_response_metadata(
         metadata=RESPONSE_METADATA,
     )
 
-    block, metadata = read_cached_year(CACHE_KEY, 2007)
+    block, metadata, _ = read_cached_year(CACHE_KEY, 2007)
 
     assert len(block) == 25
     assert metadata == RESPONSE_METADATA
@@ -197,9 +202,10 @@ def test_read_cached_year_keeps_a_complete_block_for_a_late_publisher(
         days_ago=2,
     )
 
-    block, _ = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
 
     assert block is not None
+    assert fresh is True
 
 
 def test_read_cached_year_keeps_a_missing_tail_by_default(
@@ -211,23 +217,24 @@ def test_read_cached_year_keeps_a_missing_tail_by_default(
     df.iloc[-240:] = float("nan")
     _cache_block(monkeypatch_key_value_store, df, days_ago=2)
 
-    block, _ = read_cached_year(CACHE_KEY, 2007)
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007)
 
     assert block is not None
+    assert fresh is True
     assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is True
 
 
-def test_read_cached_year_refetches_a_missing_tail_for_a_late_publisher(
+def test_read_cached_year_marks_a_missing_tail_stale_for_a_late_publisher(
     monkeypatch_key_value_store
 ):
     df = _hourly_frame("2007-12-01", "2007-12-31 23:00")
     df.iloc[-240:] = float("nan")
     _cache_block(monkeypatch_key_value_store, df, days_ago=2)
 
-    block, _ = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
 
-    assert block is None
-    assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is False
+    assert block is not None
+    assert fresh is False
 
 
 def test_read_cached_year_serves_a_missing_tail_written_within_a_day(
@@ -238,9 +245,38 @@ def test_read_cached_year_serves_a_missing_tail_written_within_a_day(
     df.iloc[-240:] = float("nan")
     _cache_block(monkeypatch_key_value_store, df, days_ago=0)
 
-    block, _ = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
 
     assert block is not None
+    assert fresh is True
+
+
+def test_read_cached_year_settles_a_block_that_never_published(
+    monkeypatch_key_value_store
+):
+    # all fill is a coverage hole (an ocean point's land-only field),
+    # not a tail still arriving; it must not be refetched forever
+    df = _hourly_frame("2007-01-01", "2007-12-31 23:00")
+    df.iloc[:] = float("nan")
+    _cache_block(monkeypatch_key_value_store, df, days_ago=2)
+
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+
+    assert fresh is True
+
+
+def test_read_cached_year_ignores_a_nightly_gap_at_the_year_end(
+    monkeypatch_key_value_store
+):
+    # a field undefined at night ends every year with a short valueless
+    # run; only a run longer than a day reads as an unpublished tail
+    df = _hourly_frame("2007-12-01", "2007-12-31 23:00")
+    df.iloc[-10:] = float("nan")
+    _cache_block(monkeypatch_key_value_store, df, days_ago=2)
+
+    block, _, fresh = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+
+    assert fresh is True
 
 
 # per-year loads: cache reads, union refresh
@@ -277,7 +313,7 @@ def test_load_year_variable_superset_refetches(
     assert list(df2.columns) == ["temperature", "wind_speed"]
 
     # the refreshed cache entry now covers both variables
-    cached, _ = read_cached_year(CACHE_KEY, 2007)
+    cached, _, _ = read_cached_year(CACHE_KEY, 2007)
     assert set(cached.columns) == {"temperature", "wind_speed"}
 
     # a temperature-only request serves the requested subset from cache
@@ -294,8 +330,27 @@ def test_load_year_refresh_keeps_cached_columns_the_request_omits(
     df = _load_2007(("wind_speed",))
     assert list(df.columns) == ["wind_speed"]
 
-    cached, _ = read_cached_year(CACHE_KEY, 2007)
+    cached, _, _ = read_cached_year(CACHE_KEY, 2007)
     assert set(cached.columns) == {"temperature", "wind_speed"}
+
+
+def test_load_year_refresh_of_a_stale_entry_keeps_its_columns(
+    mock_api_transport, monkeypatch_key_value_store
+):
+    _load_2007(("temperature",))
+
+    # the entry goes stale; a wind_speed-only request must still refetch
+    # the union so the stale block's temperature column is not dropped
+    _backdate_cache_key(
+        monkeypatch_key_value_store, CACHE_KEY, pytz.UTC.localize(datetime(2007, 3, 3))
+    )
+
+    df = _load_2007(("wind_speed",))
+    assert list(df.columns) == ["wind_speed"]
+
+    cached, _, fresh = read_cached_year(CACHE_KEY, 2007)
+    assert set(cached.columns) == {"temperature", "wind_speed"}
+    assert fresh is True
 
 
 def test_load_year_without_cache_or_web_returns_none(monkeypatch_key_value_store):
@@ -309,7 +364,7 @@ def test_load_year_without_write_leaves_the_cache_empty(
 
     assert len(df) == 8760
 
-    cached, _ = read_cached_year(CACHE_KEY, 2007)
+    cached, _, _ = read_cached_year(CACHE_KEY, 2007)
 
     assert cached is None
 
@@ -354,6 +409,23 @@ def test_requested_variables_rejects_duplicates():
 
 
 # range alignment: the shared index every source path produces
+
+
+def test_resample_bins_land_on_the_epoch_anchored_alignment_grid():
+    # an offset that does not divide a day evenly must still fill the
+    # grid align_to_range reindexes to, or the frame comes back all NaN
+    df = _hourly_frame("2024-03-15", "2024-03-25")
+    offset = pd.tseries.frequencies.to_offset("5h")
+
+    aligned = align_to_range(
+        resample_by_vocabulary(df, offset),
+        pd.Timestamp("2024-03-15", tz="UTC"),
+        pd.Timestamp("2024-03-25", tz="UTC"),
+        offset,
+    )
+
+    assert len(aligned) == 48
+    assert aligned.temperature.notna().all()
 
 
 def test_align_to_range_tick_ceils_start_and_floors_end():

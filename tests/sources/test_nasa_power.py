@@ -1,5 +1,6 @@
 import gzip
 import json
+import os
 
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -317,6 +318,23 @@ def test_night_fill_becomes_nan_and_night_zero_irradiance_survives(
     assert block.data.loc[NOON, "airmass"] == 1.03
 
 
+def test_fill_sentinel_comes_from_the_response_header(responses):
+    # the sentinel is whatever the header declares, not a hardcoded -999
+    scripted, _calls = responses
+    payload = _fixture_payload(SOLAR_FIXTURE)
+    payload["header"]["fill_value"] = -8888.0
+    for name, values in payload["properties"]["parameter"].items():
+        for stamp, value in values.items():
+            if value == -999.0:
+                values[stamp] = -8888.0
+    scripted.append(MockResponse(payload))
+
+    block = _fetch(SOLAR_NATIVE)
+
+    assert pd.isna(block.data.loc[NIGHT, "albedo"])
+    assert not (block.data == -8888.0).any().any()
+
+
 def test_surface_pressure_converts_kpa_to_hpa(mock_nasa_power_transport):
     block = _fetch(("PS",))
 
@@ -510,6 +528,22 @@ def test_solar_cell_owns_its_low_edge():
     assert cell_for("solar", 34.0, -118.29).latitude == 34.5
     assert cell_for("solar", 34.02, -118.01).longitude == -118.5
     assert cell_for("solar", 34.02, -118.0).longitude == -117.5
+
+
+def test_cell_for_wraps_the_antimeridian_to_one_cell():
+    # longitude 180 is the same meridian as -180, and the met centre that
+    # lands on 180 is keyed as -180, so Fiji-adjacent points share one
+    # cache key and every centre stays inside the api's accepted range
+    assert cell_for("met", -16.5, 180.0) == cell_for("met", -16.5, -180.0)
+    assert cell_for("met", -16.5, 179.9).longitude == -180.0
+    assert cell_for("met", -16.5, -179.9).longitude == -180.0
+    assert cell_for("solar", -16.5, 180.0).longitude == -179.5
+
+
+def test_cell_for_caps_the_solar_top_row_at_its_last_centre():
+    assert cell_for("solar", 90.0, -118.29).latitude == 89.5
+    # the met grid has a true pole row
+    assert cell_for("met", 90.0, -118.29).latitude == 90.0
 
 
 def test_cell_for_unknown_family_raises():
@@ -715,6 +749,24 @@ def test_latency_warning_dates_the_solar_edge_from_the_values(
     assert latency[0].data["published_through"] == "2026-04-30T23:00:00+00:00"
 
 
+def test_latency_warning_fires_when_the_whole_range_is_past_the_edge(
+    grid_transport, monkeypatch_key_value_store
+):
+    # asking for last month's irradiance is the likeliest way to hit the
+    # solar cliff: the requested slice is all fill, and the edge is dated
+    # from the rest of the year's block
+    _df, warnings, _provenance = _estimate(
+        start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 15, 23, tzinfo=timezone.utc),
+        variables=("ghi",),
+    )
+    latency = [w for w in warnings if w.qualified_name == "eeweather.source_latency"]
+
+    assert len(latency) == 1
+    assert latency[0].data["family"] == "solar"
+    assert latency[0].data["published_through"] == "2026-04-30T23:00:00+00:00"
+
+
 def test_no_latency_warning_on_a_fully_published_range(
     grid_transport, monkeypatch_key_value_store
 ):
@@ -755,14 +807,14 @@ def test_provenance_payload_carries_each_family_cell(
         "cell_lat": 34.0,
         "cell_lon": -118.125,
         "sources": ["MERRA2", "POWER"],
-        "api_version": "v2.9.6",
+        "api_versions": ["v2.9.6"],
         "cell_elevation": 395.0,
     }
     assert record.payload["solar"] == {
         "cell_lat": 34.5,
         "cell_lon": -118.5,
         "sources": ["SYN1DEG", "POWER"],
-        "api_version": "v2.9.6",
+        "api_versions": ["v2.9.6"],
     }
 
 
@@ -800,3 +852,21 @@ def test_daily_aggregation_sums_precipitation_and_averages_irradiance(
     # 24 hourly depths added; 24 hourly irradiances averaged
     assert df.loc["2024-06-02", "precipitation"] == pytest.approx(0.3675, abs=1e-9)
     assert df.loc["2024-06-02", "ghi"] == pytest.approx(284.38375, abs=1e-9)
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("EEWEATHER_LIVE_TESTS") != "1",
+    reason="hits the real NASA POWER API; set EEWEATHER_LIVE_TESTS=1 to run",
+)
+def test_live_fetch_serves_canonical_units():
+    source = NASAPowerSource()
+    block = source.fetch(
+        POINT[0], POINT[1], date(2024, 6, 1), date(2024, 6, 2),
+        ("T2M", "ALLSKY_SFC_SW_DWN"),
+    )
+
+    # a Los Angeles June day: degC air temperature, W/m2 midday irradiance
+    assert 5 < block.data["temperature"].mean() < 45
+    assert block.data["ghi"].max() > 400
+    assert block.data.index.tz is not None

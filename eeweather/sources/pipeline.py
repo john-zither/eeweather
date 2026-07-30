@@ -116,31 +116,51 @@ def deserialize_hourly_data(data):
     return hourly, metadata
 
 
+# longer than any night, so a field undefined at night never reads as an
+# unpublished tail
+MISSING_TAIL_MIN_HOURS = 25
+
+
 def _missing_tail(df):
-    """Whether the block ends in rows with no values at all, the shape a
-    source leaves where it has not published a year's tail yet; an empty
-    block counts as missing its tail."""
-    return bool(df.tail(1).isna().all().all())
+    """Whether the block ends in a run of valueless rows longer than a
+    day — the shape a source leaves where it has not published a year's
+    tail yet. Columns that never published anything are left out: a block
+    that is all fill is a coverage hole, settled by the volatility
+    window, not a tail still arriving. An empty block counts as missing
+    its tail."""
+    if len(df) == 0:
+        return True
+
+    published = df.loc[:, df.notna().any()]
+    if published.shape[1] == 0:
+        return False
+
+    valued = published.notna().any(axis=1)
+    last_valued = valued[valued].index[-1]
+    trailing_hours = len(valued.loc[last_valued:]) - 1
+
+    return trailing_hours >= MISSING_TAIL_MIN_HOURS
 
 
 def read_cached_year(key, year, volatility=CacheVolatility()):
-    """The fresh cached block under a key and the response metadata it
-    carries, or (None, None). An entry too old for its data year is
-    dropped."""
+    """The cached block under a key, the response metadata it carries,
+    and whether the entry is still fresh for its data year —
+    (None, None, False) when nothing is cached.
+
+    A stale block is returned rather than dropped so a refresh can fetch
+    the union of its columns and the request's; serving it is the
+    caller's decision, gated on ``fresh``."""
     cache = store()
     if not cache.key_exists(key):
-        return None, None
+        return None, None, False
 
     df, metadata = deserialize_hourly_data(cache.retrieve_json(key))
     still_arriving = volatility.missing_tail_is_volatile and _missing_tail(df)
-    if eeweather.cache._expired(
+    fresh = not eeweather.cache._expired(
         cache.key_updated(key), year, volatility.grace_days, still_arriving
-    ):
-        cache.clear(key)
+    )
 
-        return None, None
-
-    return df, metadata
+    return df, metadata, fresh
 
 
 def load_year(
@@ -158,11 +178,11 @@ def load_year(
     frame is returned reindexed to the requested columns. Returns None
     when only a fetch could serve the request and fetching is disabled.
     """
-    cached = None
+    cached, fresh = None, False
     if cacheable:
-        cached, _ = read_cached_year(key, year, volatility)
+        cached, _, fresh = read_cached_year(key, year, volatility)
 
-    cache_covers_request = cached is not None and set(variables) <= set(cached.columns)
+    cache_covers_request = fresh and cached is not None and set(variables) <= set(cached.columns)
     if read_from_cache and cache_covers_request:
         return cached[list(variables)]
 
@@ -217,7 +237,14 @@ def resample_by_vocabulary(df, offset):
     ):
         return _upsample(df, offset)
 
-    resampled = df.resample(offset, label="left", closed="left")
+    resample_kwargs = {"label": "left", "closed": "left"}
+    if isinstance(offset, pd.tseries.offsets.Tick):
+        # anchor bins to the epoch so they land on the same grid
+        # align_to_range builds with ceil()/floor(); pandas' default
+        # anchors to the frame's first day and misses that grid for any
+        # offset that does not divide a day evenly
+        resample_kwargs["origin"] = "epoch"
+    resampled = df.resample(offset, **resample_kwargs)
     columns = {}
     for column in df.columns:
         aggregation = aggregation_for(column)
