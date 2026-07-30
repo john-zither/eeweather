@@ -13,6 +13,7 @@ from datetime import timedelta
 import pandas as pd
 
 import eeweather.cache
+from ..cache import CacheVolatility
 from ..exceptions import EEWeatherWarning
 from .vocabulary import aggregation_for
 
@@ -27,7 +28,9 @@ def store():
     return eeweather.cache.key_value_store_proxy.get_store()
 
 
-def serialize_hourly_data(df):
+def serialize_hourly_data(df, metadata=None):
+    """The block written to the cache: the frame, plus whatever the
+    source recorded about the response that produced it."""
     rows = [
         [index.strftime("%Y%m%d%H")] + values
         for index, values in zip(
@@ -35,11 +38,15 @@ def serialize_hourly_data(df):
         )
     ]
     serialized = {"columns": list(df.columns), "rows": rows}
+    if metadata is not None:
+        serialized["metadata"] = metadata
 
     return serialized
 
 
 def deserialize_hourly_data(data):
+    """The frame a block holds and the response metadata it was written
+    with; blocks written without metadata deserialize to None."""
     index = pd.to_datetime(
         [row[0] for row in data["rows"]], format="%Y%m%d%H", utc=True
     )
@@ -49,41 +56,57 @@ def deserialize_hourly_data(data):
         columns=data["columns"],
         dtype=float,
     )
+    hourly = df.sort_index().resample("h").mean()
+    metadata = data.get("metadata")
 
-    return df.sort_index().resample("h").mean()
+    return hourly, metadata
 
 
-def read_cached_year(key, year):
-    """The fresh cached block under a key, or None. An entry too old for
-    its data year is dropped."""
+def _missing_tail(df):
+    """Whether the block ends in rows with no values at all, the shape a
+    source leaves where it has not published a year's tail yet; an empty
+    block counts as missing its tail."""
+    return bool(df.tail(1).isna().all().all())
+
+
+def read_cached_year(key, year, volatility=CacheVolatility()):
+    """The fresh cached block under a key and the response metadata it
+    carries, or (None, None). An entry too old for its data year is
+    dropped."""
     cache = store()
     if not cache.key_exists(key):
-        return None
-    if eeweather.cache._expired(cache.key_updated(key), year):
+        return None, None
+
+    df, metadata = deserialize_hourly_data(cache.retrieve_json(key))
+    still_arriving = volatility.missing_tail_is_volatile and _missing_tail(df)
+    if eeweather.cache._expired(
+        cache.key_updated(key), year, volatility.grace_days, still_arriving
+    ):
         cache.clear(key)
 
-        return None
+        return None, None
 
-    return deserialize_hourly_data(cache.retrieve_json(key))
+    return df, metadata
 
 
 def load_year(
     key, year, variables, fetch, cacheable,
     read_from_cache, write_to_cache, fetch_from_web,
+    volatility=CacheVolatility(),
 ):
     """One year of hourly data under a cache key, from cache when it
     covers the request.
 
-    A cache entry serves the request when it is fresh and holds every
-    requested variable. Otherwise ``fetch`` is called with the union of
-    the requested and already-cached variables, so a refresh never drops
-    a column, and its frame is returned reindexed to the requested
-    columns. Returns None when only a fetch could serve the request and
-    fetching is disabled.
+    A cache entry serves the request when it is fresh under the source's
+    ``volatility`` and holds every requested variable. Otherwise
+    ``fetch`` is called with the union of the requested and
+    already-cached variables, so a refresh never drops a column, and its
+    frame is returned reindexed to the requested columns. Returns None
+    when only a fetch could serve the request and fetching is disabled.
     """
     cached = None
     if cacheable:
-        cached = read_cached_year(key, year)
+        cached, _ = read_cached_year(key, year, volatility)
 
     cache_covers_request = cached is not None and set(variables) <= set(cached.columns)
     if read_from_cache and cache_covers_request:

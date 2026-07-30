@@ -2,11 +2,12 @@ import contextlib
 import functools
 import sqlite3
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytz
 
+from eeweather.cache import CacheVolatility
 from eeweather.sources.engine import _fetch_year, observation_cache_key
 from eeweather.sources.ghcnh import GHCNhSource
 from eeweather.sources.pipeline import (
@@ -24,6 +25,16 @@ GHCNH = GHCNhSource()
 STATION = "USW00093134"
 CACHE_KEY = observation_cache_key("ghcnh", STATION, 2007)
 
+# a grid source's response header, as an adapter would record it
+RESPONSE_METADATA = {
+    "sources": ["SYN1DEG", "MERRA2", "GEOSIT"],
+    "api_version": "v2.9.6",
+}
+
+# a source whose data year keeps arriving for four months and whose
+# missing tail means "not published yet"
+LATE_PUBLISHING = CacheVolatility(grace_days=120, missing_tail_is_volatile=True)
+
 
 def _backdate_cache_key(store, key, updated):
     with contextlib.closing(sqlite3.connect(store._path)) as conn, conn:
@@ -33,12 +44,13 @@ def _backdate_cache_key(store, key, updated):
 
 
 def _load_2007(
-    variables, read_from_cache=True, write_to_cache=True, fetch_from_web=True
+    variables, read_from_cache=True, write_to_cache=True, fetch_from_web=True,
+    volatility=CacheVolatility(),
 ):
     fetch = functools.partial(_fetch_year, GHCNH, STATION, STATION, 2007)
     block = load_year(
         CACHE_KEY, 2007, variables, fetch, GHCNH.cacheable,
-        read_from_cache, write_to_cache, fetch_from_web,
+        read_from_cache, write_to_cache, fetch_from_web, volatility,
     )
 
     return block
@@ -49,6 +61,13 @@ def _hourly_frame(start, end, value=1.0):
     df = pd.DataFrame({"temperature": value}, index=index)
 
     return df
+
+
+def _cache_block(store, df, days_ago, metadata=None):
+    store.save_json(CACHE_KEY, serialize_hourly_data(df, metadata))
+    _backdate_cache_key(
+        store, CACHE_KEY, datetime.now(pytz.UTC) - timedelta(days=days_ago)
+    )
 
 
 # serialization round-trips
@@ -63,9 +82,10 @@ def test_serialize_deserialize_hourly_data_round_trip(mock_api_transport):
     assert serialized["rows"][0][0] == "2007010100"
     assert len(serialized["rows"]) == len(df)
 
-    round_tripped = deserialize_hourly_data(serialized)
+    round_tripped, metadata = deserialize_hourly_data(serialized)
 
     pd.testing.assert_frame_equal(round_tripped, df, check_freq=False)
+    assert metadata is None
 
 
 def test_serialize_hourly_data_nan_round_trips_as_null(mock_api_transport):
@@ -75,7 +95,7 @@ def test_serialize_hourly_data_nan_round_trips_as_null(mock_api_transport):
 
     assert any(row[1] is None for row in serialized["rows"])
 
-    round_tripped = deserialize_hourly_data(serialized)
+    round_tripped, _ = deserialize_hourly_data(serialized)
 
     pd.testing.assert_frame_equal(round_tripped, df, check_freq=False)
 
@@ -83,22 +103,50 @@ def test_serialize_hourly_data_nan_round_trips_as_null(mock_api_transport):
 def test_serialize_multivariable_round_trip(mock_api_transport):
     df = _fetch_year(GHCNH, STATION, STATION, 2007, ("temperature", "wind_speed"))
 
-    round_tripped = deserialize_hourly_data(serialize_hourly_data(df))
+    round_tripped, _ = deserialize_hourly_data(serialize_hourly_data(df))
 
     pd.testing.assert_frame_equal(round_tripped, df, check_freq=False)
+
+
+def test_serialize_hourly_data_round_trips_response_metadata(mock_api_transport):
+    df = _fetch_year(GHCNH, STATION, STATION, 2007, ("temperature",))
+
+    serialized = serialize_hourly_data(df, RESPONSE_METADATA)
+
+    assert serialized["metadata"] == RESPONSE_METADATA
+
+    round_tripped, metadata = deserialize_hourly_data(serialized)
+
+    pd.testing.assert_frame_equal(round_tripped, df, check_freq=False)
+    assert metadata == RESPONSE_METADATA
+
+
+def test_deserialize_hourly_data_without_metadata_gives_none():
+    # blocks a source wrote before it recorded response metadata
+    block = {"columns": ["temperature"], "rows": [["2007010100", 1.0]]}
+
+    df, metadata = deserialize_hourly_data(block)
+
+    assert metadata is None
+    assert len(df) == 1
 
 
 # cache freshness
 
 
 def test_read_cached_year_empty(monkeypatch_key_value_store):
-    assert read_cached_year(CACHE_KEY, 2007) is None
+    block, metadata = read_cached_year(CACHE_KEY, 2007)
+
+    assert block is None
+    assert metadata is None
 
 
 def test_read_cached_year_fresh(mock_api_transport, monkeypatch_key_value_store):
     _load_2007(("temperature",))
 
-    assert read_cached_year(CACHE_KEY, 2007) is not None
+    block, _ = read_cached_year(CACHE_KEY, 2007)
+
+    assert block is not None
 
 
 def test_read_cached_year_expired_entry_is_cleared(
@@ -111,8 +159,85 @@ def test_read_cached_year_expired_entry_is_cleared(
         monkeypatch_key_value_store, CACHE_KEY, pytz.UTC.localize(datetime(2007, 3, 3))
     )
 
-    assert read_cached_year(CACHE_KEY, 2007) is None
+    block, _ = read_cached_year(CACHE_KEY, 2007)
+
+    assert block is None
     assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is False
+
+
+def test_read_cached_year_returns_the_stored_response_metadata(
+    monkeypatch_key_value_store
+):
+    _cache_block(
+        monkeypatch_key_value_store,
+        _hourly_frame("2007-01-01", "2007-01-02"),
+        days_ago=2,
+        metadata=RESPONSE_METADATA,
+    )
+
+    block, metadata = read_cached_year(CACHE_KEY, 2007)
+
+    assert len(block) == 25
+    assert metadata == RESPONSE_METADATA
+
+
+# per-source volatility: how long a cached year keeps being refetched
+
+
+def test_read_cached_year_keeps_a_complete_block_for_a_late_publisher(
+    monkeypatch_key_value_store
+):
+    # the tail rule fires on missing data, not on the source's identity
+    _cache_block(
+        monkeypatch_key_value_store,
+        _hourly_frame("2007-01-01", "2007-12-31 23:00"),
+        days_ago=2,
+    )
+
+    block, _ = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+
+    assert block is not None
+
+
+def test_read_cached_year_keeps_a_missing_tail_by_default(
+    monkeypatch_key_value_store
+):
+    # a station that stopped reporting leaves a permanent missing tail:
+    # settled data, not an unpublished one
+    df = _hourly_frame("2007-12-01", "2007-12-31 23:00")
+    df.iloc[-240:] = float("nan")
+    _cache_block(monkeypatch_key_value_store, df, days_ago=2)
+
+    block, _ = read_cached_year(CACHE_KEY, 2007)
+
+    assert block is not None
+    assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is True
+
+
+def test_read_cached_year_refetches_a_missing_tail_for_a_late_publisher(
+    monkeypatch_key_value_store
+):
+    df = _hourly_frame("2007-12-01", "2007-12-31 23:00")
+    df.iloc[-240:] = float("nan")
+    _cache_block(monkeypatch_key_value_store, df, days_ago=2)
+
+    block, _ = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+
+    assert block is None
+    assert monkeypatch_key_value_store.key_exists(CACHE_KEY) is False
+
+
+def test_read_cached_year_serves_a_missing_tail_written_within_a_day(
+    monkeypatch_key_value_store
+):
+    # volatile means refreshable daily, not refetched on every read
+    df = _hourly_frame("2007-12-01", "2007-12-31 23:00")
+    df.iloc[-240:] = float("nan")
+    _cache_block(monkeypatch_key_value_store, df, days_ago=0)
+
+    block, _ = read_cached_year(CACHE_KEY, 2007, LATE_PUBLISHING)
+
+    assert block is not None
 
 
 # per-year loads: cache reads, union refresh
@@ -123,6 +248,19 @@ def test_load_year_serves_from_cache(mock_api_transport, monkeypatch_key_value_s
     df2 = _load_2007(("temperature",))
 
     pd.testing.assert_frame_equal(df1, df2, check_freq=False)
+
+
+def test_load_year_refetches_a_missing_tail_for_a_late_publisher(
+    mock_api_transport, monkeypatch_key_value_store
+):
+    partial = _hourly_frame("2007-12-01", "2007-12-31 23:00")
+    partial.iloc[-240:] = float("nan")
+    _cache_block(monkeypatch_key_value_store, partial, days_ago=2)
+
+    df = _load_2007(("temperature",), volatility=LATE_PUBLISHING)
+
+    assert len(df) == 8760
+    assert df.temperature.notna().any()
 
 
 def test_load_year_variable_superset_refetches(
@@ -136,7 +274,7 @@ def test_load_year_variable_superset_refetches(
     assert list(df2.columns) == ["temperature", "wind_speed"]
 
     # the refreshed cache entry now covers both variables
-    cached = read_cached_year(CACHE_KEY, 2007)
+    cached, _ = read_cached_year(CACHE_KEY, 2007)
     assert set(cached.columns) == {"temperature", "wind_speed"}
 
     # a temperature-only request serves the requested subset from cache
@@ -153,7 +291,7 @@ def test_load_year_refresh_keeps_cached_columns_the_request_omits(
     df = _load_2007(("wind_speed",))
     assert list(df.columns) == ["wind_speed"]
 
-    cached = read_cached_year(CACHE_KEY, 2007)
+    cached, _ = read_cached_year(CACHE_KEY, 2007)
     assert set(cached.columns) == {"temperature", "wind_speed"}
 
 
@@ -167,7 +305,10 @@ def test_load_year_without_write_leaves_the_cache_empty(
     df = _load_2007(("temperature",), write_to_cache=False)
 
     assert len(df) == 8760
-    assert read_cached_year(CACHE_KEY, 2007) is None
+
+    cached, _ = read_cached_year(CACHE_KEY, 2007)
+
+    assert cached is None
 
 
 # range alignment: the shared index every source path produces

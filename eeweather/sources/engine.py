@@ -357,7 +357,7 @@ def _load_normals_block(
     column = adapter.variables[0]
 
     if read_from_cache and cached_ok:
-        cached = deserialize_hourly_data(cache.retrieve_json(key))
+        cached, _ = deserialize_hourly_data(cache.retrieve_json(key))
 
         return cached[column]
 
@@ -577,7 +577,8 @@ def load_cached_data(station_id, source_name="ghcnh"):
         year = int(key.rsplit("-", 1)[1])
         if eeweather.cache._expired(cache.key_updated(key), year):
             continue
-        data.append(deserialize_hourly_data(cache.retrieve_json(key)))
+        block, _ = deserialize_hourly_data(cache.retrieve_json(key))
+        data.append(block)
     if not data:
         return None
     df = pd.concat(data).resample("h").mean()
