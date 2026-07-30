@@ -157,7 +157,15 @@ VARIABLES = {
             "Gauge-bias-corrected precipitation depth.",
             "sum",
         ),
-        Variable("snowfall", "mm", "Snowfall depth.", "sum"),
+        Variable(
+            "snowfall",
+            "mm",
+            "Snowfall as liquid water equivalent, not accumulated snow depth."
+            " Produced independently of precipitation (which is gauge-bias"
+            " corrected), so snowfall can exceed precipitation; never"
+            " difference the two.",
+            "sum",
+        ),
     )
 }
 

@@ -332,6 +332,27 @@ def test_precipitation_rate_converts_to_hourly_depth(mock_nasa_power_transport):
     ] == pytest.approx(0.0370833333, abs=1e-9)
 
 
+def test_snowfall_rate_converts_to_hourly_water_equivalent(responses):
+    scripted, calls = responses
+    scripted.append(
+        MockResponse(_fixture_payload("nasa_power_snow_39.32_-120.14_2024-01.json.gz"))
+    )
+    source = NASAPowerSource()
+    block = source.fetch(
+        39.32,
+        -120.14,
+        date(2024, 1, 1),
+        date(2024, 1, 31),
+        ("T2M", "PRECTOTCORR", "PRECSNO", "FRSNO"),
+    )
+
+    # 32.61 mm/day water-equivalent rate over the hour beginning 2024-01-11 06Z
+    hour = pd.Timestamp("2024-01-11 06:00", tz="UTC")
+    assert block.data.loc[hour, "snowfall"] == pytest.approx(1.35875, abs=1e-9)
+    # snow_cover is a fraction served unscaled
+    assert block.data.loc[hour, "snow_cover"] == pytest.approx(0.65)
+
+
 def test_fetch_reports_the_response_provenance(mock_nasa_power_transport):
     met = _fetch(MET_NATIVE)
     solar = _fetch(SOLAR_NATIVE)
