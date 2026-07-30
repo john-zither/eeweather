@@ -184,7 +184,10 @@ meteorological grids above: `ghi`/`dni`/`dhi`/`bhi` and
 `clearsky_ghi`/`clearsky_dni`/`clearsky_dhi`/`clearsky_bhi` [W/m2] — `dhi`
 plus `bhi` closes to `ghi` to rounding at high sun and degrades in the
 sunrise/sunset hour, and no irradiance component is ever derived from the
-other two; the `clearsky_*` fields are a computed clearsky model driven by
+other two. Validation against shoreline ground stations found the solar
+grid's one-degree cells read systematically sunnier than a coast under a
+marine layer (tens of W/m² of high bias, against near-zero bias inland):
+treat grid `ghi` on a stratus-prone coastline as biased high; the `clearsky_*` fields are a computed clearsky model driven by
 hourly aerosol and water-vapor inputs, jittery and not a monotone ceiling
 on the all-sky value, and not a substitute for a deterministic clearsky
 model. `airmass` [1] is relative (Kasten) airmass, not pressure-corrected,
