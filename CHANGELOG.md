@@ -156,7 +156,14 @@ This release is a redesign; the public API is not compatible with 0.3.x.
 * Tests run fully offline against captured NCEI access api payloads,
   with a python/os matrix workflow, tox environments, ruff lint, and a
   97% coverage floor.
-
+* Geography packs are refreshed from the Census Gazetteer and are part
+  of the updatable set, so a rebuilt pack reaches installed clients. They
+  had been excluded on the grounds that geography is static, which is
+  false: Census redrew the ZCTA boundaries for 2020 and republishes
+  annually, and the packaged pack was built from the 2010 definition.
+* Provenance records ``registry_vintage``, the ``refreshed_at`` stamp of
+  the registry a request resolved against, so a result is reproducible by
+  record rather than only by code.
 0.3.29
 ------
 
