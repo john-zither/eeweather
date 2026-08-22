@@ -156,7 +156,15 @@ This release is a redesign; the public API is not compatible with 0.3.x.
 * Tests run fully offline against captured NCEI access api payloads,
   with a python/os matrix workflow, tox environments, ruff lint, and a
   97% coverage floor.
-
+* Transport failures raise ``FetchError`` rather than escaping as raw
+  ``requests`` exceptions, distinguishing a network failure from absent
+  data (``DataNotAvailableError``).
+* A cached block is replaced only after a successful refetch, so a failed
+  refresh no longer destroys usable data.
+* ``load_data(deadline=)`` bounds the wall-clock time a request may spend
+  on the network, raising ``FetchDeadlineExceeded``. Unbounded by default.
+  Every fetch path retried three or four times at a 120 second socket
+  timeout, per station-year, with nothing capping the total.
 0.3.29
 ------
 
