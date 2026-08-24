@@ -204,6 +204,7 @@ class WeatherStation(object):
         write_to_cache: bool = True,
         fetch_from_web: bool = True,
         imputation: bool = False,
+        deadline: float | None = None,
     ):
         """Load this station's weather data between two dates (inclusive).
 
@@ -241,6 +242,10 @@ class WeatherStation(object):
             Also return a ``<variable>_imputed_fraction`` companion for
             each point-in-time variable, saying how much of each value
             was fabricated by gap interpolation rather than observed.
+        deadline : float, optional
+            Wall-clock seconds this request may spend on the network,
+            after which it raises FetchDeadlineExceeded. Unbounded by
+            default.
 
         Returns
         -------
@@ -265,6 +270,7 @@ class WeatherStation(object):
             write_to_cache=write_to_cache,
             fetch_from_web=fetch_from_web,
             imputation=imputation,
+            deadline=deadline,
         )
         self.provenance = df.attrs["provenance"]
 

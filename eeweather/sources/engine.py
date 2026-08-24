@@ -28,6 +28,7 @@ from .base import Provenance
 from .cz2010 import CZ2010Source
 from .ghcnh import GHCNhSource
 from .nasa_power import NASAPowerSource
+from .budget import fetch_budget
 from .pipeline import (
     align_to_range,
     data_gap_warnings,
@@ -450,6 +451,7 @@ def load_data(
     fetch_from_web: bool = True,
     raise_when_empty: bool | None = None,
     imputation: bool = False,
+    deadline: float | None = None,
 ):
     """Load a station's weather data between two dates (inclusive).
 
@@ -495,6 +497,20 @@ def load_data(
         hours that were fabricated. Accumulations are never interpolated
         and get no companion; neither do typical-year (normals) sources,
         which have no observations to be missing.
+    deadline : float, optional
+        Wall-clock seconds this request may spend on the network, after
+        which it raises FetchDeadlineExceeded. Unbounded by default,
+        which is what it has always been: every fetch path retries three
+        times at a 120 second socket timeout, per station-year, and
+        nothing caps the total -- so against an unresponsive upstream a
+        large run does not fail visibly, it runs for days.
+
+        The bound is on fetching, not on cached reads or computation,
+        and it is approximate at the edge: socket timeouts are capped at
+        the remaining budget, so a request can overshoot by up to one
+        timeout. A deadline raises rather than returning what it managed
+        to collect, deliberately -- partial weather that looks complete
+        is the failure this is meant to make visible.
 
     Returns
     -------
@@ -504,7 +520,21 @@ def load_data(
         without data are NaN. The frame's ``attrs["provenance"]`` maps
         each source used to a Provenance record.
     """
+    # its own thread, so it does not inherit the caller's budget
     maybe_update()
+    with fetch_budget(deadline):
+        return _load_data(
+            station_id, start, end, frequency, variables, source, sources,
+            read_from_cache, write_to_cache, fetch_from_web, raise_when_empty,
+            imputation,
+        )
+
+
+def _load_data(
+    station_id, start, end, frequency, variables, source, sources,
+    read_from_cache, write_to_cache, fetch_from_web, raise_when_empty,
+    imputation=False,
+):
     validate_range(start, end)
 
     # the frequency vocabulary is pandas', bound by delegation: pandas

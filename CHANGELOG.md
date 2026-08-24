@@ -160,7 +160,6 @@ This release is a redesign; the public API is not compatible with 0.3.x.
   which numpy 2.5 deprecates; under ``filterwarnings = ["error"]`` that
   failed every coarser- and finer-than-hourly resample path. pandas 3.0
   fixes it upstream, so this only affects pandas 2.x.
-=======
 * ``load_data(imputation=True)`` returns a
   ``<variable>_imputed_fraction`` companion for each point-in-time
   variable: 1.0 for an hour nothing was reported for, 0.0 for one that
@@ -169,6 +168,16 @@ This release is a redesign; the public API is not compatible with 0.3.x.
   of hours that were observed — so a caller with a rule about missing data
   had no way to apply it. Outside the vocabulary, so it averages to the
   fabricated fraction at coarser frequencies. Off by default.
+=======
+* Transport failures raise ``FetchError`` rather than escaping as raw
+  ``requests`` exceptions, distinguishing a network failure from absent
+  data (``DataNotAvailableError``).
+* A cached block is replaced only after a successful refetch, so a failed
+  refresh no longer destroys usable data.
+* ``load_data(deadline=)`` bounds the wall-clock time a request may spend
+  on the network, raising ``FetchDeadlineExceeded``. Unbounded by default.
+  Every fetch path retried three or four times at a 120 second socket
+  timeout, per station-year, with nothing capping the total.
 0.3.29
 ------
 

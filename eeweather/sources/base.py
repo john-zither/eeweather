@@ -8,7 +8,6 @@ subclass them.
 """
 from __future__ import annotations
 
-import time
 
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
@@ -16,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import requests
 
-from ..exceptions import DataNotAvailableError
+from . import budget
+from ..exceptions import DataNotAvailableError, FetchError
 from ..registry.db import metadata_db_connection_proxy
 
 
@@ -114,19 +114,30 @@ REQUEST_TIMEOUT_SECONDS = 120
 
 def request_text(url):
     """Fetch a url's text, retrying connection errors and server errors
-    with growing backoff; client errors raise immediately."""
+    with growing backoff; client errors raise immediately.
+
+    Transport failures are raised as :class:`~eeweather.exceptions.FetchError`
+    so callers need not import ``requests`` to catch them.
+
+    Honours an ambient fetch budget: the attempt loop stops when the budget
+    is spent, socket timeouts are capped at what is left, and backoff never
+    sleeps past the deadline.
+    """
     for attempt in range(REQUEST_TRIES):
+        budget.check(url)
         try:
-            response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response = requests.get(
+                url, timeout=budget.timeout_for(REQUEST_TIMEOUT_SECONDS)
+            )
             response.raise_for_status()
-        except requests.HTTPError:
+        except requests.HTTPError as error:
             if response.status_code < 500 or attempt == REQUEST_TRIES - 1:
-                raise
-            time.sleep(REQUEST_RETRY_BACKOFF_SECONDS * (attempt + 1))
-        except requests.RequestException:
+                raise FetchError("request", cause=error) from error
+            budget.sleep_within(REQUEST_RETRY_BACKOFF_SECONDS * (attempt + 1))
+        except requests.RequestException as error:
             if attempt == REQUEST_TRIES - 1:
-                raise
-            time.sleep(REQUEST_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                raise FetchError("request", cause=error) from error
+            budget.sleep_within(REQUEST_RETRY_BACKOFF_SECONDS * (attempt + 1))
         else:
             return response.text
 
@@ -222,8 +233,9 @@ class NormalsSource(object):
         url = self._url(archive["usaf_id"])
         try:
             text = request_text(url)
-        except requests.HTTPError as error:
-            if error.response is not None and error.response.status_code == 404:
+        except FetchError as error:
+            # a missing archive file is absent data, not a transport failure
+            if error.status_code == 404:
                 raise DataNotAvailableError(
                     self.name, station_id=station_id
                 ) from error

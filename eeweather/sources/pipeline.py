@@ -14,7 +14,7 @@ import pandas as pd
 
 import eeweather.cache
 from ..cache import CacheVolatility
-from ..exceptions import EEWeatherWarning
+from ..exceptions import EEWeatherWarning, FetchError
 from .vocabulary import aggregation_for
 
 
@@ -177,6 +177,10 @@ def load_year(
     already-cached variables, so a refresh never drops a column, and its
     frame is returned reindexed to the requested columns. Returns None
     when only a fetch could serve the request and fetching is disabled.
+
+    If that fetch fails for transport reasons and a stale cached block
+    holds every requested variable, the stale block is served rather than
+    the failure propagating.
     """
     cached, fresh = None, False
     if cacheable:
@@ -194,7 +198,15 @@ def load_year(
     else:
         cached_columns = tuple(cached.columns)
     fetch_variables = tuple(dict.fromkeys(variables + cached_columns))
-    df = fetch(fetch_variables)
+    try:
+        df = fetch(fetch_variables)
+    except FetchError:
+        # stale data is real data; only a transport failure degrades this way
+        if read_from_cache and cached is not None and set(variables) <= set(
+            cached.columns
+        ):
+            return cached[list(variables)]
+        raise
     if cacheable and write_to_cache:
         store().save_json(key, serialize_hourly_data(df))
 
