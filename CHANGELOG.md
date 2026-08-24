@@ -168,7 +168,6 @@ This release is a redesign; the public API is not compatible with 0.3.x.
   of hours that were observed — so a caller with a rule about missing data
   had no way to apply it. Outside the vocabulary, so it averages to the
   fabricated fraction at coarser frequencies. Off by default.
-=======
 * Transport failures raise ``FetchError`` rather than escaping as raw
   ``requests`` exceptions, distinguishing a network failure from absent
   data (``DataNotAvailableError``).
@@ -178,6 +177,15 @@ This release is a redesign; the public API is not compatible with 0.3.x.
   on the network, raising ``FetchDeadlineExceeded``. Unbounded by default.
   Every fetch path retried three or four times at a 120 second socket
   timeout, per station-year, with nothing capping the total.
+=======
+* Geography packs are refreshed from the Census Gazetteer and are part
+  of the updatable set, so a rebuilt pack reaches installed clients. They
+  had been excluded on the grounds that geography is static, which is
+  false: Census redrew the ZCTA boundaries for 2020 and republishes
+  annually, and the packaged pack was built from the 2010 definition.
+* Provenance records ``registry_vintage``, the ``refreshed_at`` stamp of
+  the registry a request resolved against, so a result is reproducible by
+  record rather than only by code.
 0.3.29
 ------
 
