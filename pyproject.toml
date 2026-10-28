@@ -2,14 +2,19 @@
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
+# eeweather-epa: a frozen snapshot of opendsm/eeweather master at 5dd1959
+# (2026-10-13), redistributed under Apache-2.0 so thermostat can depend on a
+# released build of the redesigned API. Changed from upstream: this name, the
+# version, the README preamble, NOTICE, and the publish workflow URL. The
+# import package is still `eeweather`. See NOTICE.
 [project]
-name = "eeweather"
+name = "eeweather-epa"
 dynamic = ["version"]
-description = "Obtain weather station data for OpenDSM"
+description = "Frozen snapshot of opendsm/eeweather (master @ 5dd1959) for epathermostat"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "opendsm", email = "opendsm@lists.lfenergy.org" }]
 classifiers = [
   "Programming Language :: Python :: 3.11",
@@ -41,6 +46,7 @@ dev = [
 ]
 
 [project.urls]
+Snapshot = "https://github.com/john-zither/eeweather/tree/snapshot/eeweather-epa"
 Homepage = "https://github.com/opendsm/eeweather"
 Documentation = "https://opendsm.energy"
 Repository = "https://github.com/opendsm/eeweather"

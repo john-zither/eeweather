@@ -1,3 +1,12 @@
+> **eeweather-epa** is a frozen, unmodified snapshot of
+> [opendsm/eeweather](https://github.com/opendsm/eeweather) master at commit
+> `5dd1959` (2026-10-13), published so that
+> [epathermostat](https://github.com/EPAENERGYSTAR/epathermostat) can depend on
+> a released build of eeweather's redesigned API. Only packaging metadata
+> differs (see `NOTICE`). It installs the same `eeweather` import package, so
+> do not install it alongside `eeweather`. For anything else, use and report
+> issues against upstream eeweather.
+
 # EEweather: Weather for energy-efficiency modeling
 
 [![License](https://img.shields.io/github/license/opendsm/eeweather.svg)](https://github.com/opendsm/eeweather)

@@ -1,0 +1,19 @@
+eeweather-epa
+Copyright opendsm contributors
+
+This distribution is a snapshot of eeweather (https://github.com/opendsm/eeweather)
+at commit 5dd19599788fafd59d3e3c71086041465c943900 (2026-10-13), licensed under
+the Apache License, Version 2.0 (see LICENSE).
+
+It is redistributed, not maintained: no eeweather behavior is changed.
+The following files were modified from upstream, for packaging only:
+
+  pyproject.toml                  distribution name eeweather-epa, description,
+                                  Snapshot URL, NOTICE added to license files
+  eeweather/__version__.py        version 2026.10.13 (upstream reported 0.3.30)
+  README.md                       preamble identifying this snapshot
+  .github/workflows/publish.yaml  PyPI project URL
+  NOTICE                          this file (added)
+
+The import package is still `eeweather`. Do not install eeweather-epa alongside
+the `eeweather` distribution; both install the same package directory.
